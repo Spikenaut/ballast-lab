@@ -1,0 +1,19 @@
+[package]
+name = "ballast-lab"
+version = "0.1.0"
+edition = "2024"
+description = "Reward-modulated training loops for Spikenaut SNN/LLM fusion"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+thiserror = "1.0"
+rand = "0.8"
+
+# Workspace path dependencies
+neuromod = { path = "../neuromod" }
+spikenaut-reward = { path = "../spikenaut-reward" }
+spikenaut-encoder = { path = "../spikenaut-encoder" }
+spikenaut-telemetry = { path = "../spikenaut-telemetry" }
+spikenaut-spine = { path = "../spikenaut-spine" }
