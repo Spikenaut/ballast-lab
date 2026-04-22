@@ -1,8 +1,6 @@
-use neuromod::SpikingNetwork;
-use spikenaut_telemetry::TelemetrySnapshot;
-use spikenaut_reward::MiningRewardState;
 use crate::config::TrainingConfig;
-use std::collections::VecDeque;
+use neuromod::{NeuroModulators, SpikingNetwork, StepError};
+use thiserror::Error;
 
 /// Summary of a training session.
 #[derive(Debug, Default, Clone)]
@@ -15,103 +13,93 @@ pub struct TrainingSummary {
     pub per_neuron_spikes: Vec<u64>,
 }
 
+/// Input sample for a generic training session.
+#[derive(Debug, Clone)]
+pub struct TrainingExample {
+    pub stimuli: Vec<f32>,
+    pub reward: f32,
+}
+
+#[derive(Debug, Error)]
+pub enum TrainerError {
+    #[error("network step failed: {0:?}")]
+    Step(StepError),
+    #[error("empty training batch")]
+    EmptyBatch,
+}
+
 /// The SpikenautTrainer manages the evolution of SNN parameters using reward-modulated STDP.
 pub struct SpikenautTrainer {
     pub config: TrainingConfig,
-    reward_state: MiningRewardState,
-    history: VecDeque<TelemetrySnapshot>,
 }
 
 impl SpikenautTrainer {
     pub fn new(config: TrainingConfig) -> Self {
-        Self {
-            config,
-            reward_state: MiningRewardState::new(),
-            history: VecDeque::with_capacity(1000),
-        }
+        Self { config }
     }
 
-    /// Runs a training step using a single telemetry snapshot.
-    /// 
-    /// This mimics the "closed loop" training:
-    /// 1. Ingest telemetry.
-    /// 2. Compute reward (dopamine/cortisol).
-    /// 3. Update SNN modulators.
-    /// 4. Step SNN (integration + spikes + STDP).
+    /// Runs a training step using generic stimuli and an externally computed reward.
     pub fn train_step(
         &mut self,
         network: &mut SpikingNetwork,
-        snapshot: &TelemetrySnapshot,
-    ) -> f32 {
-        // 1. Compute Reward (Mining Dopamine)
-        let gpu_telemetry = spikenaut_reward::GpuTelemetry {
-            hashrate_mh: snapshot.dynex_hashrate_mh as f32,
-            power_w: snapshot.gpu_power_w,
-            gpu_temp_c: snapshot.gpu_temp_c,
-            gpu_clock_mhz: snapshot.gpu_clock_mhz,
-            vddcr_gfx_v: snapshot.gpu_voltage_v,
-            ..Default::default()
-        };
-        
-        let reward = self.reward_state.compute(&gpu_telemetry, Some(snapshot.cpu_tctl_c));
+        stimuli: &[f32],
+        reward: f32,
+    ) -> Result<Vec<usize>, StepError> {
+        let mut modulators: NeuroModulators = network.modulators;
 
-        // 2. Map reward to neuromodulators
-        // Positive reward -> Dopamine boost
-        // Negative reward -> Cortisol boost
+        // Positive reward shifts toward dopamine; negative toward cortisol.
         if reward > 0.0 {
-            network.modulators.dopamine = (network.modulators.dopamine + reward * 0.1).clamp(0.0, 1.0);
-            network.modulators.cortisol = (network.modulators.cortisol - reward * 0.05).clamp(0.0, 1.0);
+            modulators.dopamine = (modulators.dopamine + reward * 0.1).clamp(0.0, 1.0);
+            modulators.cortisol = (modulators.cortisol - reward * 0.05).clamp(0.0, 1.0);
         } else {
-            network.modulators.cortisol = (network.modulators.cortisol - reward * 0.2).clamp(0.0, 1.0); // reward is negative
-            network.modulators.dopamine = (network.modulators.dopamine + reward * 0.1).clamp(0.0, 1.0);
+            modulators.cortisol = (modulators.cortisol - reward * 0.2).clamp(0.0, 1.0);
+            modulators.dopamine = (modulators.dopamine + reward * 0.1).clamp(0.0, 1.0);
         }
 
-        // 3. Encode telemetry to spikes (simplified sum for now, matches spikenaut-hybrid logic)
-        let mut stimuli = [0.0f32; neuromod::NUM_INPUT_CHANNELS];
-        stimuli[0] = (snapshot.gpu_voltage_v - 1.0).abs() * 2.0;
-        stimuli[1] = snapshot.gpu_power_w / 450.0;
-        stimuli[2] = snapshot.dynex_hashrate_mh as f32 / 0.015;
-        stimuli[3] = (snapshot.gpu_temp_c - 50.0) / 40.0;
-        
-        // 4. Step the network (includes STDP internally in neuromod::engine)
-        network.step(&stimuli, &network.modulators.clone());
-
-        reward
+        network.step(stimuli, &modulators)
     }
 
-    /// Replays a batch of telemetry data for training.
+    /// Replays a batch of generic training examples.
     pub fn run_session(
         &mut self,
         network: &mut SpikingNetwork,
-        data: &[TelemetrySnapshot],
-    ) -> TrainingSummary {
+        data: &[TrainingExample],
+    ) -> Result<TrainingSummary, TrainerError> {
+        if data.is_empty() {
+            return Err(TrainerError::EmptyBatch);
+        }
+
         let mut summary = TrainingSummary::default();
         let initial_thresholds = network.get_thresholds();
-        let initial_weights: Vec<Vec<f32>> = network.neurons.iter().map(|n| n.weights.clone()).collect();
-        
+        let initial_weights: Vec<Vec<f32>> =
+            network.neurons.iter().map(|n| n.weights.clone()).collect();
+
         summary.per_neuron_spikes = vec![0; network.neurons.len()];
         let mut total_reward = 0.0;
 
-        for snapshot in data {
-            let reward = self.train_step(network, snapshot);
-            total_reward += reward;
+        for example in data {
+            let spikes = self
+                .train_step(network, &example.stimuli, example.reward)
+                .map_err(TrainerError::Step)?;
+            total_reward += example.reward;
             summary.steps_processed += 1;
 
-            for (i, neuron) in network.neurons.iter().enumerate() {
-                if neuron.last_spike {
-                    summary.total_spikes += 1;
-                    summary.per_neuron_spikes[i] += 1;
+            summary.total_spikes += spikes.len() as u64;
+            for &idx in &spikes {
+                if idx < summary.per_neuron_spikes.len() {
+                    summary.per_neuron_spikes[idx] += 1;
                 }
             }
         }
 
-        summary.avg_reward = if !data.is_empty() { total_reward / data.len() as f32 } else { 0.0 };
+        summary.avg_reward = total_reward / data.len() as f32;
 
-        // Calculate deltas
         let final_thresholds = network.get_thresholds();
-        for i in 0..network.neurons.iter().len() {
-            summary.threshold_drifts.push(final_thresholds[i] - initial_thresholds[i]);
-            
+        for i in 0..network.neurons.len() {
+            summary
+                .threshold_drifts
+                .push(final_thresholds[i] - initial_thresholds[i]);
+
             let mut w_deltas = Vec::new();
             for (ch, &w) in network.neurons[i].weights.iter().enumerate() {
                 w_deltas.push(w - initial_weights[i][ch]);
@@ -119,6 +107,6 @@ impl SpikenautTrainer {
             summary.weight_drifts.push(w_deltas);
         }
 
-        summary
+        Ok(summary)
     }
 }

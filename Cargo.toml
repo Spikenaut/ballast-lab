@@ -1,8 +1,8 @@
 [package]
-name = "ballast-lab"
+name = "plasticity-lab"
 version = "0.1.0"
 edition = "2024"
-description = "Reward-modulated training loops for Spikenaut SNN/LLM fusion"
+description = "Generic reward-modulated plasticity loops for spiking neural networks"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -11,9 +11,15 @@ tracing = "0.1"
 thiserror = "1.0"
 rand = "0.8"
 
-# Workspace path dependencies
-neuromod = { path = "../neuromod" }
-spikenaut-reward = { path = "../spikenaut-reward" }
-spikenaut-encoder = { path = "../spikenaut-encoder" }
-spikenaut-telemetry = { path = "../spikenaut-telemetry" }
-spikenaut-spine = { path = "../spikenaut-spine" }
+# Git dependencies
+neuromod = { git = "https://github.com/Limen-Neural/neuromod" }
+limbic-critic = { git = "https://github.com/Limen-Neural/limbic-critic", optional = true }
+axon-encoder = { git = "https://github.com/Limen-Neural/axon-encoder", optional = true }
+
+[features]
+default = []
+integration = ["dep:limbic-critic", "dep:axon-encoder"]
+
+[patch."https://github.com/Limen-Neural/limbic-critic"]
+limbic-critic = { path = "vendor/limbic-critic" }
+[workspace]
