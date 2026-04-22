@@ -20,6 +20,4 @@ axon-encoder = { git = "https://github.com/Limen-Neural/axon-encoder", optional 
 default = []
 integration = ["dep:limbic-critic", "dep:axon-encoder"]
 
-[patch."https://github.com/Limen-Neural/limbic-critic"]
-limbic-critic = { path = "vendor/limbic-critic" }
 [workspace]
